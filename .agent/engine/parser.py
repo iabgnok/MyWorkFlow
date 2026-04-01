@@ -1,5 +1,6 @@
 import re
 import yaml
+import json
 
 class WorkflowParser:
     def __init__(self, filepath):
@@ -69,5 +70,10 @@ class WorkflowParser:
     @staticmethod
     def replace_variables(text, variables):
         for key, value in variables.items():
-            text = text.replace(f"{{{{{key}}}}}", str(value))
+            if isinstance(value, (dict, list)):
+                # 深度类型安全保护，防止嵌套结构被破坏
+                replacement = json.dumps(value, ensure_ascii=False)
+            else:
+                replacement = str(value)
+            text = text.replace(f"{{{{{key}}}}}", replacement)
         return text

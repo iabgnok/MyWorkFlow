@@ -2,6 +2,7 @@ from enum import Enum
 from dataclasses import dataclass
 import asyncio
 import logging
+import inspect
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,8 @@ SKILL_IDEMPOTENCY = {
     "shell_executor": IdempotencyLevel.L2,
 }
 
+from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
+
 def resolve_policy(skill_name: str, step_metadata: dict = None) -> ErrorPolicy:
     """根据技能名和元数据解析具体合并后的错误重试策略"""
     # TODO: 未来可从 step_metadata 中提取 error_policy 进行覆盖，如：yaml 中的 error_policy: {max_retries: 5}
@@ -46,31 +49,39 @@ def resolve_policy(skill_name: str, step_metadata: dict = None) -> ErrorPolicy:
 
 async def execute_with_policy(skill_name: str, execute_func, *args, **kwargs):
     """
-    带有 Error Policy 保护框架的技能执行器
+    基于 tenacity 重构的带有 Error Policy 保护框架的技能执行器
     如果是 L0/L1 则依据 max_retries 进行退避重试
     如果是 L2 则强行拦截自动重试机制
     """
     policy = resolve_policy(skill_name)
     level = SKILL_IDEMPOTENCY.get(skill_name, IdempotencyLevel.L2)
-    
-    retries = 0
-    # L2 级别技能强制不允许自动重试
     max_retries = policy.max_retries if level in (IdempotencyLevel.L0, IdempotencyLevel.L1) else 0
 
-    while True:
+    if max_retries == 0:
         try:
-            if asyncio.iscoroutinefunction(execute_func):
+            if inspect.iscoroutinefunction(execute_func):
                 return await execute_func(*args, **kwargs)
             else:
                 return await asyncio.to_thread(execute_func, *args, **kwargs)
         except Exception as e:
-            logger.error(f"❌ 技能 {skill_name} 本次执行失败: {str(e).strip()}")
-            if retries < max_retries:
-                retries += 1
-                sleep_time = policy.backoff_base ** retries
-                logger.warning(f"⚠️ 检测到该技能幂等性为 {level.value}。准备在 {sleep_time} 秒后进行第 {retries}/{max_retries} 次重试...")
-                await asyncio.sleep(sleep_time)
-            else:
-                logger.error(f"🚫 技能 {skill_name} 重试耗尽 (已尝试 {retries} 次) 或不支持重试({level.value})。触发耗尽策略配置: {policy.action_on_exhaust.value}")
-                # 触发耗尽动作封装
-                raise Exception(f"[{policy.action_on_exhaust.value.upper()}] Skill {skill_name} failed after {retries} retries. Cause: {e}")
+            logger.error(f"❌ 技能 {skill_name} ({level.value}) 执行失败，不允许重试: {e}")
+            raise Exception(f"[{policy.action_on_exhaust.value.upper()}] Skill {skill_name} failed: {e}")
+
+    # L0/L1 启用 tenacity 重试
+    try:
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(max_retries + 1),
+            wait=wait_exponential(multiplier=policy.backoff_base, min=1, max=30),
+            reraise=True # 将实际的异常抛出
+        ):
+            with attempt:
+                if attempt.retry_state.attempt_number > 1:
+                    logger.warning(f"⚠️ 技能 {skill_name} 进行第 {attempt.retry_state.attempt_number - 1}/{max_retries} 次重试...")
+                
+                if inspect.iscoroutinefunction(execute_func):
+                    return await execute_func(*args, **kwargs)
+                else:
+                    return await asyncio.to_thread(execute_func, *args, **kwargs)
+    except Exception as e:
+        logger.error(f"🚫 技能 {skill_name} 重试耗尽 (已尝试 {max_retries} 次)，触发耗尽策略配置: {policy.action_on_exhaust.value}")
+        raise Exception(f"[{policy.action_on_exhaust.value.upper()}] Skill {skill_name} failed after {max_retries} retries. Cause: {e}")

@@ -1,6 +1,7 @@
 import aiosqlite
 import json
 import logging
+import copy
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -50,9 +51,24 @@ class StateStore:
             self._conn = None
             logger.info("📦 状态数据库连接已关闭。")
 
+    def _mask_secrets(self, context: dict) -> dict:
+        """启发式脱敏，避免 API 密钥等凭据明文落库"""
+        safe_context = copy.deepcopy(context)
+        sensitive_keywords = {'api_key', 'token', 'secret', 'password', 'credential', 'auth'}
+        
+        for k, v in safe_context.items():
+            if any(sec in k.lower() for sec in sensitive_keywords) and isinstance(v, str):
+                safe_context[k] = "******"
+            elif isinstance(v, dict):
+                # 递归处理嵌套字典
+                safe_context[k] = self._mask_secrets(v)
+                
+        return safe_context
+
     async def save_run_state(self, run_id: str, workflow_name: str, status: str, current_step_id: int, context: dict):
         """保存任务当前的运行状态"""
-        context_str = json.dumps(context, ensure_ascii=False)
+        safe_context = self._mask_secrets(context)
+        context_str = json.dumps(safe_context, ensure_ascii=False)
         await self._conn.execute('''
             INSERT INTO runs (run_id, workflow_name, status, current_step_id, context)
             VALUES (?, ?, ?, ?, ?)

@@ -611,6 +611,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "tenacity" },
 ]
 
 [package.metadata]
@@ -625,6 +626,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rich", specifier = ">=14.3.3" },
+    { name = "tenacity", specifier = ">=9.1.4" },
 ]
 
 [[package]]
