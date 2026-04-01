@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 # 因为我们现在目录名是 .agent，Python 默认把 . 当作相对引入的标识，因此直接通过路径操作而不是通过.agent导入
 from engine.parser import WorkflowParser
 from engine.state_store import StateStore
+from engine.error_policy import execute_with_policy
 from skills.atomic.llm_prompt_call import LLMPromptCall
 from skills.atomic.file_writer import FileWriter
 from skills.atomic.file_reader import FileReader
@@ -75,11 +76,8 @@ class Runner:
                 if skill_name in self.skills:
                     skill = self.skills[skill_name]
                     try:
-                        # 兼容同步或者异步调用的技能
-                        if asyncio.iscoroutinefunction(skill.execute):
-                            output = await skill.execute(text_context, self.context)
-                        else:
-                            output = await asyncio.to_thread(skill.execute, text_context, self.context)
+                        # 使用 error_policy 包装好的带重试和分类拦截策略的执行逻辑
+                        output = await execute_with_policy(skill_name, skill.execute, text_context, self.context)
                         
                         if output:
                             logger.info(f"✅ 技能 {skill_name} 执行完毕，输出变量: {list(output.keys())}")
@@ -87,7 +85,7 @@ class Runner:
                         else:
                             logger.warning(f"⚠️ 技能 {skill_name} 没有返回任何输出。")
                     except Exception as e:
-                        logger.error(f"❌ 技能 {skill_name} 执行失败: {e}")
+                        logger.error(f"🔴 技能 {skill_name} 最终由 ErrorPolicy 后向抛出终止异常: {e}")
                         # 发生异常时记录错误状态
                         await self.state_store.save_run_state(current_run_id, workflow_name, f"failed: {e}", step['id'], self.context)
                         raise

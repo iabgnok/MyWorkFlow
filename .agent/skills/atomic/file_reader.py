@@ -13,17 +13,12 @@ class FileReader:
             return {}
             
         if not os.path.exists(file_path):
-            print(f"[FileReader] 错误：文件不存在: {file_path}")
-            return {}
+            raise FileNotFoundError(f"文件不存在: {file_path}")
 
         print(f"[FileReader] 正在读取文件: {file_path}")
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            print(f"[FileReader] 成功读取文件内容，共 {len(content)} 字符。")
-            
-            # 返回提取出的变量，供工作流存入上下文
-            return {"file_content": content}
-        except Exception as e:
-            print(f"[FileReader] 发生异常: {e}")
-            return {}
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        print(f"[FileReader] 成功读取文件内容，共 {len(content)} 字符。")
+        
+        # 返回提取出的变量，供工作流存入上下文
+        return {"file_content": content}
