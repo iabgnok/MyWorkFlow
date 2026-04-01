@@ -13,6 +13,7 @@ from engine.parser import WorkflowParser
 from engine.state_store import StateStore
 from engine.error_policy import execute_with_policy
 from skills.atomic.llm_prompt_call import LLMPromptCall
+from skills.atomic.llm_evaluator_call import LLMEvaluatorCall
 from skills.atomic.file_writer import FileWriter
 from skills.atomic.file_reader import FileReader
 
@@ -28,6 +29,7 @@ class Runner:
         self.state_store = StateStore(db_path) if db_path else StateStore(os.path.join(os.path.dirname(__file__), 'workflow_state.db'))
         self.skills = {
             'llm_prompt_call': LLMPromptCall(),
+            'llm_evaluator_call': LLMEvaluatorCall(),
             'file_writer': FileWriter(),
             'file_reader': FileReader()
         }
@@ -60,11 +62,14 @@ class Runner:
             # 更新运行状态（开始）
             await self.state_store.save_run_state(current_run_id, workflow_name, "running", start_step_id, self.context)
             
-            for step in steps:
-                if step['id'] < start_step_id:
-                    logger.info(f"⏭️ [跳过步骤 {step['id']}]: {step['name']} (由于断点恢复)")
-                    continue
+            current_step_index = start_step_id - 1
+            
+            # 用于阶段性退回重试拦截 (Escalation Ladder)
+            jump_back_counters = {}
 
+            while current_step_index < len(steps):
+                step = steps[current_step_index]
+                
                 logger.info(f"▶️ [执行步骤 {step['id']}]: {step['name']} | 使用技能: {step['action']}")
                 
                 # 记录即将执行的步骤，一旦崩溃将恢复执行该步骤
@@ -82,6 +87,31 @@ class Runner:
                         if output:
                             logger.info(f"✅ 技能 {skill_name} 执行完毕，输出变量: {list(output.keys())}")
                             self.context.update(output)
+                            
+                            # 判定跃迁逻辑 (Jump Back)
+                            if "__jump_to__" in output:
+                                target_id = output["__jump_to__"]
+                                
+                                # 更新 Escalation Ladder 计数器
+                                jump_back_counters[target_id] = jump_back_counters.get(target_id, 0) + 1
+                                current_escalation = jump_back_counters[target_id]
+                                
+                                logger.warning(f"🔙 收到跃迁指令，退回至步骤 {target_id}。当前退回次数: {current_escalation}")
+                                
+                                if current_escalation >= 4:
+                                    logger.error(f"🛑 [Escalation Ladder L4] 步骤 {target_id} 连续 4 轮失败，触发人工阻断！")
+                                    raise Exception(f"步骤 {target_id} 的生成被 Evaluator 连续打回 4 次，请进行人工干预 (Human-in-the-loop)。")
+                                
+                                # 将降级策略级别 (escalation) 和反馈注入到上下文中，后续传回
+                                self.context["escalation_level"] = current_escalation
+                                if "__feedback__" in output:
+                                    self.context["evaluator_feedback"] = output["__feedback__"]
+                                
+                                # 更新游标
+                                # target_id 起点是 1，对应 index 为 target_id - 1
+                                current_step_index = target_id - 1
+                                continue
+                                
                         else:
                             logger.warning(f"⚠️ 技能 {skill_name} 没有返回任何输出。")
                     except Exception as e:
@@ -91,6 +121,8 @@ class Runner:
                         raise
                 else:
                     logger.error(f"❌ 未找到对应注册的技能: '{skill_name}'! 该步骤已被跳过。")
+
+                current_step_index += 1
 
             # 所有步骤执行成功后
             await self.state_store.save_run_state(current_run_id, workflow_name, "completed", len(steps), self.context)

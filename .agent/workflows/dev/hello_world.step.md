@@ -19,7 +19,10 @@ description: A basic test workflow
 - llm_output
 
 ```prompt
-Please summarize the following context briefly in English with emoji:
+Please summarize the following context briefly in English with emoji and your summary should not more than 5 words:
+
+{{file_content}}
+```
 Context from file: {{file_content}}
 ```
 
