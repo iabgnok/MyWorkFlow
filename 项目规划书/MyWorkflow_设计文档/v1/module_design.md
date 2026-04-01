@@ -74,7 +74,7 @@ def _parse_steps(body: str) -> List[StepDefinition]:
         flags    =_FLAG_RE.findall(block)
         cond_m   = _COND_RE.search(block)
         guard_m  =_GUARD_RE.search(block)
-        title    = block.strip().split['\n'](0).strip(": ")
+        title    = block.strip().split('\n')[0].strip(": ")
 
         steps.append(StepDefinition(
             index        = i,
@@ -93,15 +93,23 @@ def _parse_steps(body: str) -> List[StepDefinition]:
 # ── 第三阶段：变量注入（运行时调用）────────────────────
 
 def inject_variables(raw_params: Dict, state: Dict) -> Dict:
-    """将 {{var}} 占位符替换为 state 中的实际值，深度递归处理嵌套结构"""
-    import json
-    serialized = json.dumps(raw_params)
-    def replacer(m):
-        key = m.group(1).strip()
-        val = state.get(key, m.group(0))  # 未命中保留原占位符，留给下游检测
-        return json.dumps[val](1:-1)      # 去除 JSON 字符串两端引号
-    injected = re.sub(r'\{\{(\w+)\}\}', replacer, serialized)
-    return json.loads(injected)
+    """将 {{var}} 占位符替换为 state 中的实际值，使用深度递归处理保证类型安全"""
+    import re
+    def _traverse(node):
+        if isinstance(node, dict):
+            return {k: _traverse(v) for k, v in node.items()}
+        elif isinstance(node, list):
+            return [_traverse(v) for v in node]
+        elif isinstance(node, str):
+            # 完整匹配时，保持原变量类型（如直接返回 dict/list/int，避免非法 JSON 截断）
+            match = re.fullmatch(r'\{\{(\w+)\}\}', node.strip())
+            if match:
+                key = match.group(1)
+                return state.get(key, node)
+            # 字符串内嵌部分匹配，强制转为字符串拼接
+            return re.sub(r'\{\{(\w+)\}\}', lambda m: str(state.get(m.group(1), m.group(0))), node)
+        return node
+    return _traverse(raw_params)
 
 # ── 缓存：同一 path 的 manifest 在进程内只解析一次 ──────
 
@@ -149,7 +157,8 @@ class Runner:
         for step in manifest.steps[state.current_step:]:
             state.current_step = step.index
 
-            # ── 条件跳过 ────────────────────────────────
+            # ── 条件跳过（安全求值） ──────────────────────
+            # 注意：需使用 simpleeval 进行隔离环境代码求值，严防 LLM 自动生成工作流时的执行漏洞！
             if step.condition and not _eval_condition(step.condition, state.variables):
                 await self.store.mark(state.run_id, step.index, "skipped")
                 continue
@@ -158,7 +167,13 @@ class Runner:
             if step.sub_workflow:
                 sub_inputs  = inject_variables(step.raw_params, state.variables)
                 sub_outputs = await self.run(step.sub_workflow, sub_inputs)
-                state.variables.update(sub_outputs.variables)
+                
+                # 处理 Output Mapping 避免子工作流输出污染父工作流全局命名空间
+                mapping = step.raw_params.get("output_mapping", {})
+                for k, v in sub_outputs.variables.items():
+                    mapped_key = mapping.get(k, k)
+                    state.variables[mapped_key] = v
+                    
                 await self.store.mark(state.run_id, step.index, "done", sub_outputs.variables)
                 continue
 
@@ -891,6 +906,10 @@ prompt: |
   deploy, publish, send_email
 
   输出每个操作的：operation_id, risk_level(safe/needs_confirm/dangerous), reason
+
+  审计规则指引（静态规则优先）：
+  1. 只要操作命中了上述危险或需确认关键词，即使你判断其用途为 safe，也必须强制标记为 dangerous 或 needs_confirm！
+  2. 风险评级规则只允许你提升等级，不允许降低由于静态关键词命中的基座等级。
 
 output_schema: RiskLabel[]
 Output: risk_labels
