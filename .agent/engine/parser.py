@@ -2,6 +2,10 @@ import re
 import yaml
 import json
 
+class WorkflowParseError(Exception):
+    """Exception raised for errors in the workflow parsing process."""
+    pass
+
 class WorkflowParser:
     def __init__(self, filepath):
         self.filepath = filepath
@@ -10,13 +14,21 @@ class WorkflowParser:
         self.steps = []
 
     def parse(self):
-        with open(self.filepath, 'r', encoding='utf-8') as f:
-            self.raw_content = f.read()
+        try:
+            with open(self.filepath, 'r', encoding='utf-8') as f:
+                self.raw_content = f.read()
+        except FileNotFoundError:
+            raise WorkflowParseError(f"Workflow file not found: {self.filepath}")
+        except Exception as e:
+            raise WorkflowParseError(f"Failed to read workflow file {self.filepath}: {e}")
 
         # Parse YAML frontmatter
         yaml_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', self.raw_content, re.DOTALL)
         if yaml_match:
-            self.metadata = yaml.safe_load(yaml_match.group(1)) or {}
+            try:
+                self.metadata = yaml.safe_load(yaml_match.group(1)) or {}
+            except yaml.YAMLError as e:
+                raise WorkflowParseError(f"Invalid YAML frontmatter in {self.filepath}: {e}")
             content_without_frontmatter = self.raw_content[yaml_match.end():]
         else:
             self.metadata = {}

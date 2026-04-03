@@ -68,17 +68,26 @@ class StateStore:
     async def save_run_state(self, run_id: str, workflow_name: str, status: str, current_step_id: int, context: dict):
         """保存任务当前的运行状态"""
         safe_context = self._mask_secrets(context)
-        context_str = json.dumps(safe_context, ensure_ascii=False)
-        await self._conn.execute('''
-            INSERT INTO runs (run_id, workflow_name, status, current_step_id, context)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(run_id) DO UPDATE SET
-                status=excluded.status,
-                current_step_id=excluded.current_step_id,
-                context=excluded.context,
-                updated_at=CURRENT_TIMESTAMP
-        ''', (run_id, workflow_name, status, current_step_id, context_str))
-        await self._conn.commit()
+        try:
+            context_str = json.dumps(safe_context, ensure_ascii=False)
+        except TypeError as e:
+            logger.error(f"❌ Context 包含无法 JSON 序列化的对象: {e}")
+            context_str = "{}"
+            
+        try:
+            await self._conn.execute('''
+                INSERT INTO runs (run_id, workflow_name, status, current_step_id, context)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    status=excluded.status,
+                    current_step_id=excluded.current_step_id,
+                    context=excluded.context,
+                    updated_at=CURRENT_TIMESTAMP
+            ''', (run_id, workflow_name, status, current_step_id, context_str))
+            await self._conn.commit()
+        except aiosqlite.OperationalError as e:
+            logger.error(f"❌ 数据库并发操作失败 (可能由于文件锁): {e}")
+            raise Exception(f"Failed to write state into database: {e}")
 
     async def load_run_state(self, run_id: str):
         """加载中断的任务状态"""

@@ -85,30 +85,38 @@ class LLMEvaluatorCall:
                     output_text = response.text
                     
                     # 尝试解析 JSON
+                    target_step = context.get('generator_step_id', 2)
                     json_str_match = re.search(r'\{.*\}', output_text, re.DOTALL)
                     if json_str_match:
-                        eval_json = json.loads(json_str_match.group(0))
-                        
-                        logger.info(f"🧐 Evaluator 评审结果: {eval_json['status']} 给出分数: {eval_json.get('score')}")
-                        
-                        target_step = 2 # 假设退回到 step 2 (Generator)。实际可以从 context `generator_step_id` 拿
-                        if "generator_step_id" in context:
-                            target_step = context["generator_step_id"]
+                        try:
+                            eval_json = json.loads(json_str_match.group(0))
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"⚠️ Evaluator 虽然返回了疑似 JSON，但格式受损无法解析: {e}。强制执行 Fallback 降级重试。")
+                            return {
+                                "evaluator_report": '{"status": "REJECTED", "reason": "JSON Parse Error"}',
+                                "__jump_to__": target_step,
+                                "__feedback__": f"[System Fallback] 上次你返回的审查报告格式损坏 (无法被解析为标准的 JSON)：{e}，请严格按照要求的 JSON 格式输出。"
+                            }
+
+                        logger.info(f"🧐 Evaluator 评审结果: {eval_json.get('status', 'UNKNOWN')} 给出分数: {eval_json.get('score', 0)}")
                         
                         if eval_json.get("status") == "REJECTED":
                             return {
                                 "evaluator_report": json.dumps(eval_json, ensure_ascii=False),
                                 "__jump_to__": target_step,
-                                "__feedback__": str(eval_json.get("defects")) + " | " + eval_json.get("overall_feedback", "")
+                                "__feedback__": str(eval_json.get("defects", [])) + " | " + str(eval_json.get("overall_feedback", ""))
                             }
                         else:
                             return {
                                 "evaluator_report": json.dumps(eval_json, ensure_ascii=False)
                             }
                     else:
-                        logger.warning(f"Evaluator 的返回没有包含正常的 JSON: {output_text[:50]}...")
-                        # 异常 fallback
-                        return {}
+                        logger.warning(f"⚠️ Evaluator 的返回没有包含正常的 JSON: {output_text[:100]}... 强制执行 Fallback 降级重试。")
+                        return {
+                            "evaluator_report": '{"status": "REJECTED", "reason": "No JSON match"}',
+                            "__jump_to__": target_step,
+                            "__feedback__": "[System Fallback] 你的上一轮回复中没有发现有效的 JSON 块。系统已对你当前生成的代码自动判定为 REJECTED。请确保返回指定的 JSON 对象包围在 {} 内。"
+                        }
             except Exception as e:
                 logger.error(f"❌ Evaluator 评估过程 LLM 调用异常: {e}")
                 return {"eval_error": str(e)}
